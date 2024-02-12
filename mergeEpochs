@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Takes out chunks of text between end-date and next IRIS Header or end of file
+# compares this text with previous epoch; if same everything, change end-date.
+# if different, write to file as new entry.
+# Run on both DC and SIS RESP files for consistency
+# run as ./mergeEpochs stationName
+# performs merging for all files not .dataless or .txt in folder
+# returns file with "_Altered" appended to filename
+
+# In the future, it would be nice to add if numerical differences (poles, gains, etc) that prevent merging can be ignored 
+
+# if number of arguments is not at least 1, exit and remind user of usage
+if [ "$#" -ne 1 ]
+then
+        echo "Error: Wrong number of arguments."
+        echo "Syntax: mergeEpochs Input_Folder"
+        exit 1
+fi
+
+inputFolder="$1"
+# only files in folder should be the .dataless, the .text, and a bunch of RESP files	
+files=$(find "$inputFolder" -maxdepth 1 -not -type d ! -name '*.dataless' ! -name '*.txt') 
+
+mergeExt="_Altered"
+
+for file in $files
+do 
+	# create new files with extension
+	mergedFile="${file}${mergeExt}"
+	rm -f $mergedFile
+	touch $mergedFile
+	#echo "file: $file"
+	lastLine=($(cat $file | wc -l)) # returns the line number of last line
+
+	#grab line numbers of all Start dates
+	startDate=($(grep -Fn 'start date:' $file | cut -f1 -d:))
+
+	#grab line numbers of all End dates
+	endDate=($(grep -Fn 'end date:' $file | cut -f1 -d:))
+
+	# Get the IRIS SEED Headers- indicate beginning of epoch text
+	stationHeader=($(grep -Fn 'station' $file | cut -f1 -d:))
+	stationLength=(${#stationHeader[@]})
+
+	prevText="" 
+	# For each IRIS SEED Header
+	for i in "${!stationHeader[@]}"
+	do
+	      let nextIndex=$i+1;
+	      # Get the line number after End date
+              let afterEnd=${endDate[$i]}+1
+	      # Get the line number before IRIS Header; if after last header, return last line
+	      if [ $nextIndex -lt $stationLength ]
+	      then
+		   let beforeNextHeader=${stationHeader[$nextIndex]}-1
+	      else
+		   let beforeNextHeader=$lastLine	
+	      fi
+	      # Extract text between and including two lines
+	      currText=$(sed -n "${afterEnd},${beforeNextHeader}p" $file)
+	      # Compare with previous epoch text
+	      if [ "$currText" = "$prevText" ]
+	      then
+		   # If same text, change the end date	
+	           endText=($(sed -n "${endDate[$i]}p" $file)) # extracts the current end date from file
+                   endString=$( IFS=$"    "; echo "${endText[*]}" ) # make it a string- will be an array otherwise
+		   sed -i "${lastEndDateLine}s/.*/${endString}/" $mergedFile # substitute whatever is at the last end date with extracted end date
+		   sed -i "${lastEndDateLine}s/end date:/    end date:   /" $mergedFile # spacing is off because IFS uses a single space; fixed here 
+	      else
+		   # If not same, print to file with merge extension
+		   writeText=$(sed -n "${stationHeader[$i]},${beforeNextHeader}p" $file)  #includes all info unlike currText
+		   echo "${writeText[*]}">>$mergedFile 
+		   lastEndDateLine=($(grep -Fn 'end date' $mergedFile | cut -f1 -d: | tail -1)) # get the most recent end date line number
+	      fi
+	      prevText="$currText" # set previous text to current text for comparison purposes
+	done
+done

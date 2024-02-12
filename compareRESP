@@ -1,0 +1,266 @@
+#!/bin/bash
+
+# run as ./compareRESP -n network -s station -l local_location  -t test or production -f preview or published -p percent for range
+# a local copy of the response files is copied to the station folder created when ran. These files are then acted on by mergeEpochs.
+# Diff is used to compare the altered local & SIS files with extension .diff that are put in folder called 'Altered_Diffs'
+# A summary file with name {networkCode}.{stationName}_Comparison.summary is created using makeRESPSummary- contents printed on screen  
+
+# Requires rdseed to extract files from dataless
+# Please publish/preview through 'Publish Files or Access Published Files' on SIS before running if dataless is not in current directory 
+# I made a lot of assumptions with naming conventions which could be an issue, capitalized station name is hopefully in your local RESP filenames
+
+# Author: Christina Valen; email: christina.valen@berkeley.edu
+
+
+while getopts ":n:s:l:t:f:p:" option
+do
+	case $option in
+	n)
+		networkCode="$OPTARG";;
+	s)
+		station="$OPTARG";;
+	l)
+		dataCenterLocation="$OPTARG";;
+	t)
+		sisType="$OPTARG";;
+	f)
+		pubType="$OPTARG";;
+	p)
+		percentInput="$OPTARG";;
+	?)
+		printf "\nUsage: ./compareRESP -n network -s station -l local_location  -t test or production -f preview or published -p percent for range \n"
+		exit 2;;
+	esac
+done
+
+
+if [ -z "$networkCode" ]
+then
+	printf "\nNetwork Code?\t"
+	read networkCode
+fi
+
+if [ -z "$station" ]
+then
+        printf "\nStation Name?\t"
+        read station
+fi
+
+networkCode="${networkCode^^}"
+station="${station^^}"
+
+
+RESP_FOLDER="./${networkCode}.${station}_RESP_COMPARISON"
+
+alterSuffix="_Altered"
+
+if [ -z "$dataCenterLocation" ]
+then	
+	printf "\nLocation of non-SIS RESP files (full path)? Script will create local copy for the comparison.\n"
+	read -r dataCenterLocation
+fi
+
+#NCEDC_HOME="/work/pub/doc" #Specific to NCEDC
+#DC_LOCATION="${NCEDC_HOME}/${networkCode}.info/${networkCode}.responses"
+
+locFirstChar=`echo $dataCenterLocation | cut -c1-1`
+if [[ "$locFirstChar" != "/"  ]]
+then
+	dataCenterLocation="$(pwd)/$dataCenterLocation"
+fi
+DC_LOCATION="${dataCenterLocation}"
+
+echo "Deleting previous ${RESP_FOLDER}"
+rm -rf "${RESP_FOLDER}"
+mkdir $RESP_FOLDER
+
+# look for SIS dataless volume in directory.
+# otherwise, get SIS dataless from SIS; it might be possible to have multiple dataless files in same location
+# so just find the one of interest; makes naming assumptions 
+DATALESS_FILE_NAME=($(echo *"${networkCode}"*"${station}"*".dataless"))
+
+currLocation=$(pwd)
+if  [ -f "${DATALESS_FILE_NAME}" ]
+then
+	# .dataless file exists for station in current location
+	printf "\n${station} .dataless file found in ${currLocation}\n"
+	# copy to avoid confusion over where dataless went
+	printf "Copying found .dataless to ${RESP_FOLDER} \n"
+        cp "${DATALESS_FILE_NAME}" "${RESP_FOLDER}"
+	datalessFile=$(ls ${DATALESS_FILE_NAME}) 
+else
+	# .dataless not found; downloading from SIS
+	printf "\n${station} .dataless file not found in ${currLocation}\n"
+
+	if [ -z "$sisType" ]
+	then
+		printf "\nProduction or Test SIS?\t"
+		read sisType
+	fi
+	# make input lowercase and check first letter in case of typos
+	sisType=${sisType,,}
+	if [[ "${sisType}" == "t"* ]]
+	then
+		sisType="test"
+	elif [[ "${sisType}" == "p"* ]]
+	then
+		sisType="production"
+	fi
+
+	if [ -z "$pubType" ]
+	then
+		printf "Published or Preview?\t"
+		read pubType
+	fi
+	pubType=${pubType,,}
+	# download published dataless
+	if [[ "${pubType}" == "pub"*  ]]
+	then	
+		datalessWebpage="https://files.anss-sis.scsn.org/${sisType}/dataless/${networkCode}/${networkCode}_${station}.dataless"
+	# download preview dataless
+	elif [[ "${pubType}" == "pre"*  ]]
+	then
+		sisType=`echo "${sisType}" | cut -c1-4` # naming is slightly different for preview 
+		datalessWebpage="https://files.anss-sis.scsn.org/preview/preview_${sisType}_${networkCode}_${station}.dataless"
+	fi
+
+	printf "Downloading .dataless from ${datalessWebpage}\n"
+        wget "${datalessWebpage}" > dataless_download_output.txt
+	wgetOutput=$(ls *"dataless"*)
+	mv dataless_download_output.txt "${RESP_FOLDER}"
+	if [[ -z "$wgetOutput" ]] # Failed to find dataless; exit script
+	then
+		printf "\nUnable to find ${networkCode} ${station} *.dataless.\nPlease double check that ${pubType} files are available through SIS."
+		printf "\nExiting Script\n"
+		exit 1
+	fi
+        # move to prevent next run from using same dataless over and over when it should be downloaded
+        printf "Moving downloaded dataless to ${RESP_FOLDER}\n"
+	datalessFile=($(ls ${DATALESS_FILE_NAME}))
+	mv "${datalessFile}" "${RESP_FOLDER}"
+fi
+
+# get percent input if not given before
+if [ -z "$percentInput" ]
+then
+	printf "\nPercent to use for comparison range? Applies to poles/zeros/polynomials/gains/sensitivities\nDefault is 3%%\n"
+	read percentInput
+fi
+
+percentInput=($(echo ${percentInput} | cut -d '%' -f 1 )) || percentInput=${percentInput}
+# set to 3% if no input given
+if [ -z "$percentInput" ]
+then
+        percentInput=3
+fi
+percent=($(echo "$percentInput/100" |bc -l)) || percent=0.03
+echo -e "Using ${percentInput}% for comparisons.\n"
+
+cd ${RESP_FOLDER} # Let's do everything inside the created folder
+printf "\nExtracting SIS RESP files from .dataless\n"
+
+rdseed -Rf "${datalessFile}" > extracted_SIS_RESP.txt || {
+	printf "\nrdseed not found; visit https://github.com/iris-edu-legacy/rdseed to download.\n" 
+	exit 1
+}
+
+# place extracted files into labeled folder
+
+SIS_ORIGINAL="SIS_RESP_${station}"
+mkdir $SIS_ORIGINAL
+mv "RESP"* $SIS_ORIGINAL
+
+
+# 1. Make a local copy of non-SIS RESP files
+DC_stat="DC_RESP_${station}"
+LOCAL_DC_COPY="${DC_stat}"
+
+mkdir $LOCAL_DC_COPY 
+printf "\nCopying from ${DC_LOCATION} to ${RESP_FOLDER}/${LOCAL_DC_COPY}\n"
+cp "${DC_LOCATION}/"*"${station}"* $LOCAL_DC_COPY ||{
+	echo "Can't find files associated with station ${station} in ${DC_LOCATION}. Exiting."
+	exit 1
+} 
+
+# get files, ignore directories and files that are dataless/txt 
+SIS_FILES=$(find "$SIS_ORIGINAL" -maxdepth 1 -not -type d ! -name '*.dataless' ! -name '*.txt')
+DC_FILES=$(find "$LOCAL_DC_COPY" -maxdepth 1 -not -type d ! -name '*.dataless' ! -name '*.txt')
+
+# 2. make a folder for altered SIS files
+ALTERED_SIS="SIS_RESP_${station}_Altered"
+printf "\nCreating folder ${ALTERED_SIS} for altered responses"
+mkdir ${ALTERED_SIS}
+
+# 3. create altered folder for Local RESP files
+ALTERED_DC="${LOCAL_DC_COPY}${alterSuffix}"
+printf "\nCreating folder ${ALTERED_DC} for altered responses\n\n"
+mkdir $ALTERED_DC
+
+normExt="_Normalized"
+
+# run normalizeDetails to get rid of text junk; run on merged files
+# put in station folder and move to overwrite current altered files
+# run for SIS RESP files; input from SIS altered folder; output goes to station folder
+sisFiles="${SIS_FILES}"
+for x in $sisFiles
+do
+	cp $x "${x}${normExt}"
+done
+# move those files that end in norm 
+mv "${SIS_ORIGINAL}/"*"${normExt}" $ALTERED_SIS
+datacenterFolder="${DC_FILES}"
+for x in $datacenterFolder
+do
+        cp $x "${x}${normExt}"
+done
+mv "${LOCAL_DC_COPY}/"*"${normExt}" $ALTERED_DC 
+
+# try to get rid of differences between files for better comparison
+../normalizeDetails "${ALTERED_SIS}" "${ALTERED_DC}" 
+
+# run mergeEpochs for SIS Response files
+printf "\nRunning mergeEpochs for SIS ${station} files"
+../mergeEpochs "${ALTERED_SIS}"
+# move merged files to altered station folder
+rm -f "${ALTERED_SIS}/"*"${normExt}" # get rid of the normalized RESP files
+#mv "${Altered}/RESP"*"${alterSuffix}"* $ALTERED_SIS
+
+# run merge for Data Center files in local folder; "DC_${station}" needs to be included to know where to run
+printf "\nRunning mergeEpochs for copied RESP ${station} files in ${LOCAL_DC_COPY}\n"
+../mergeEpochs "${ALTERED_DC}"
+rm -f "${ALTERED_DC}/"*"${normExt}"
+#mv "${statFolder}/RESP"*"${alterSuffix}"* $ALTERED_DC
+
+# create folder for altered .diff files
+DIFF_FOLDER_NAME="Altered_Diffs"
+DIFF_FOLDER="${DIFF_FOLDER_NAME}" 
+mkdir $DIFF_FOLDER
+
+#change into directory to make life easier
+cd ${ALTERED_SIS}
+# create .diff files for all of the files in local data center copy
+for x in *
+do
+	diff $x "../${ALTERED_DC}/$x" > $x.diff	
+done 
+
+# put .diff into designated folder
+mv *.diff "../${DIFF_FOLDER}"
+printf "\n*_Altered.diff files created and moved to ${DIFF_FOLDER}\n"
+
+# get out of folder to run next script
+cd ..
+
+# write a summary to file and screen
+summaryFileName="${station}_Comparison.summary"
+printf "\nWriting summary from .diff files to $summaryFileName: \n\n"
+
+../makeRESPSummary "${DIFF_FOLDER}" "${percentInput}" > $summaryFileName 
+
+inconsistencies=($(cat $summaryFileName))
+if [ -z ${inconsistencies} ]
+then
+	echo -e "No inconsistencies found! ${summaryFileName} will be empty.\n"
+else
+	cat $summaryFileName
+fi

@@ -1,0 +1,474 @@
+#!/bin/bash
+
+# Create a summary file from *_Altered.diff files
+
+# extract info from values to see if they are within user provided percent of each other
+findInRange ()
+{
+# Makes assumption that E+ Notation is used; will return unexpected result otherwise
+        baseVal="$1"
+	# value is compared to range of basVal*(1 +/- percent)
+        compareVal="$2"
+	percent="${3:-0.03}"	
+
+	baseVal=$(sed "s/^-//" <<< "$baseVal")
+	compareVal=$(sed "s/^-//" <<< "$compareVal")
+
+        # Extract number from input- get rid of E+ notation
+	baseN=$(echo "$baseVal" | cut -de -f 2) || {
+		echo "RESP file numbers should be in E+ notation; something went wrong";
+		exit 1
+	}
+        baseNumber=($(echo "$baseVal" | cut -de -f 1))
+	baseN=($(sed "s/+//" <<< $baseN)) #get rid of the plus for good measure
+	N=$(echo "10^$baseN" |bc -l) 
+	baseVal=($(bc <<< "$baseNumber*$N"))
+	# Repeat same extraction for other input value
+	compareN=($(echo "$compareVal" | cut -de -f 2))
+        compareNumber=($(echo "$compareVal" | cut -de -f 1))
+        compareN=($(sed 's/+//' <<< $compareN))
+	N=($(echo "10^$compareN" |bc -l))
+	compareVal=($(bc <<< "$compareNumber*$N"))
+	modification=($(bc <<< "$baseVal*$percent"))
+	# range upper & lower limits
+	lowerEnd=($(bc <<< "$baseVal - $modification"))
+	upperEnd=($(bc <<< "$baseVal + $modification"))	
+	# nested if-statements; bc is needed to compare decimals
+	if (( $(echo "$compareVal >= $lowerEnd" |bc -l) ))
+	then
+		if (( $(echo "$compareVal <= $upperEnd" |bc -l) ))
+		then
+			verdict=0
+		else
+			verdict=1
+		fi
+	else
+		verdict=1
+	fi
+        echo $verdict
+}
+
+# get the date for the discrepancy; need to use line above in .diff- otherwise might return something unexpected
+# look in original file for closest date using sed and grep
+getSISDate ()
+{
+	diffFile="$1"
+	originalSISFile="$2"
+	diffLineNum="$3"	
+
+	# grab previous line in .diff file, number before , is line to extract before
+	beforeDiffLineNum=$(( $diffLineNum - 1 ))
+        originalLineNum=($(sed -n "${beforeDiffLineNum}p" ${diffFile}))
+	originalLineNum=($(echo $originalLineNum | cut -d 'c' -f 1 | cut -d ',' -f 1 ))
+	# get line numbers for all start dates
+	startDateLines=($(grep -Fn "start date:" ${originalSISFile} | cut -d ':' -f 1))
+	nearestDate=0
+	# another for loop; keep getting line nums and then break when the line with inconsistency is passed returning most recent
+	for lineNum in ${startDateLines[@]}
+	do
+		if [[ $originalLineNum =~ ^[0-9]+$ ]] 
+		then
+			lineNum=($(echo $lineNum | cut -d ':' -f 1))
+			if [ $lineNum -ge $originalLineNum ]
+			then
+				break
+			fi
+		fi
+		nearestDate=$lineNum	
+	done
+	startDate=($(sed -n "${nearestDate}p" $originalSISFile))
+	endLine=$(( $nearestDate + 1 ))
+	endDate=($(sed -n "${endLine}p" $originalSISFile))
+	if [ $endDate = *"no"*  ] || [ $endDate = *"time"* ]
+	then
+		echo "${startDate[-1]} to no ending time"
+	else
+		echo "${startDate[-1]} to ${endDate[-1]}"
+	fi
+}
+
+# Usage
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]
+then
+        echo "Error: Wrong number of arguments."
+        echo "Syntax: makeRESPSummary FolderLocation [optional: percent_for_ignore_range]."
+        exit 1
+fi
+
+
+DIFF_FOLDER="$1"
+folderExt="_Altered"
+percent="$2"
+# location of all of the diff files
+files=$(find "${DIFF_FOLDER}" -maxdepth 1 -not -type d ! -name '*.dataless' ! -name '*.txt')  
+
+# location of original (altered) files
+originalSISFolder=(*"SIS"*"${folderExt}")
+
+trueSub=1 # for the sole purpose of avoiding bash booleans
+
+declare -A codes
+codes=( ["pole"]="b053f15-18"
+        ["zero"]="b053f10-13"
+	["polynomial"]="b062f15-16"
+      )
+
+# It would be better to grep all files and then go from there, but sunken costs and all that
+for file in $files
+do
+	filename=($(echo "$file" | cut -d '/' -f 2| cut -d '_' -f 1))
+	# original SIS file used to get dates in other areas
+	originalSISFilename=($(echo "${originalSISFolder}"/*"${filename}*"))
+        originalSISFile=($(ls ${originalSISFilename}))
+
+        # possible extra epoch
+        # the reason that there is an extra epoch is because of a merging inconsistency
+
+	# Identify Extra Epochs: can usually be identified by a bunch of arrows in one direction
+
+        inconsistentEpoch=$(grep -n " station:" $file)
+	epochVerified=0
+        # The epoch won't have both < & >, if it does, it's most likely a station name discrepancy
+	# If both arrows exist, it's not an extra epoch
+	if [[ ${inconsistentEpoch[@]} == *"<"* ]] && [[ ${inconsistentEpoch[@]} != *">"* ]]
+        then
+                originalFile="${originalSISFile}"
+        elif [[ ${inconsistentEpoch[@]} != *"<"* ]] && [[ ${inconsistentEpoch[@]} == *">"* ]]
+        then
+                originalFolder=($(echo *"DC"*"${folderExt}"))
+		originalFilename=($(echo "${originalFolder}"/*"${filename}*"))
+        	originalFile=($(ls ${originalFilename}))	
+        else
+                epochVerified=$trueSub
+        fi
+        if [ $epochVerified -eq 0 ] && [ ! -z "$inconsistentEpoch" ]
+        then
+		# get line number from start of grep results
+		epochLineNum=($(echo $inconsistentEpoch | cut -d ':' -f 1))
+		# get all of the line number portions from the .diff	
+		numberLines=($(grep -n "[0-9][a-z][0-9]" $file))
+		nearestLine=0
+		# find the closest line number portion above station 	
+		for line in $numberLines
+		do
+			line=($(echo $line | cut -d ':' -f 1 ))	
+			if [ $line -gt $epochLineNum  ]
+                        then
+                                break
+                        fi
+			nearestLine=$line
+		done
+		# extract right-most line number from the diff file
+		originalLineNum=($(sed -n "${nearestLine}p" $file | cut -d ':' -f 2 | cut -d 'c' -f 2 | cut -d ',' -f 2))
+                echo -e "\nExtra Epoch Suspected in $originalFile\n"
+                # find the line numbers with Station in original file
+		startLineNums=($(grep -Fn "start date:" $originalFile | cut -d ':' -f 1))
+		startAfterLine=0
+		counter=0
+		for startLine in ${startLineNums[@]}
+		do
+			startAfterLine=($(echo $startLine | cut -d ':' -f 1))
+			if [ $startAfterLine -ge $originalLineNum  ]
+                        then
+                                break
+                        fi
+			counter=$(( $counter + 1 ))
+		done
+		counterBefore=$(( $counter - 1 ))
+		startBeforeLine=($(echo ${startLineNums[$counterBefore]}))
+		 # make a file of all contents between previous start and next 
+                beforeFilename="epochBefore_${filename}.txt"
+                rm -rf "${beforeFilename}"
+                # need line number; saving to file before grep ensures proper output
+		sed -n "${startBeforeLine[@]},${startAfterLine[@]}p" $originalFile>>"${beforeFilename}"
+		# delete up to the end date 
+		beforeEndDate=($( grep -Fn "end date:" $beforeFilename | cut -d ':' -f 1))
+		sed -i "1,${beforeEndDate}d" "${beforeFilename}"
+                # cut station header left at bottom
+                beforeFileLastLine=($(cat "${beforeFilename}" | wc -l))
+                epochEndLine=($(grep -Fn 'station' ${beforeFilename} | cut -d ':' -f 1))
+                if (( ${#epochEndLine[@]} > 1 ))
+                then
+                        epochEndLine="${epochEndLine[-1]}"
+                fi
+		 # don't need to consider the case where there isn't an epoch above the extra epoch
+                # in that case, the extra epoch isn't the result of bad merging and this exercise doesn't apply 
+                # finally, make a file with the epoch before minus header
+		if [ -n $epochEndLine ]
+		then
+			sed -i "${epochEndLine},${beforeFileLastLine}d" "${beforeFilename}"
+		fi
+                # epoch after instance;move past line to get rid of end date
+                lastLine=($(cat $originalFile | wc -l))
+                afterFilename="epochAfter_${filename}.txt"
+                rm -rf "${afterFilename}"
+		sed -n "${startAfterLine},${lastLine}p" $originalFile>>"${afterFilename}"
+                lineNumAfter=($(grep -Fn 'station' ${afterFilename} | cut -d ':' -f 1))
+		lineLength=(${#lineNumAfter[@]})
+                # If more than 1 epoch before; take the most recent to be the epoch belonging to the date of interest
+                if (( ${lineLength} > 1 ))
+                then
+                        lineNumAfter="${lineNumAfter[0]}"
+                fi
+		# case where there is another epoch after extra epoch; take out those epochs
+                if [[ -n "${lineNumAfter}" ]]   
+		then
+			afterFileLastLine=($(cat "${afterFilename}" | wc -l))
+			sed -i "${lineNumAfter},${afterFileLastLine}d" "${afterFilename}"
+		fi
+                # print assorted dates
+		startDate=($(grep "start date:" $afterFilename | cut -d ':' -f 2))
+		endDate=($(grep -n "end date:" $afterFilename))	
+		endDateLine=($(echo $endDate | cut -d ':' -f 1))
+		endDate=${endDate[-1]}
+		# delete start and end dates at beginning of file
+		sed -i "1,${endDateLine}d" $afterFilename
+		if [[ ${endDate[@]} == *"time"* ]]
+		then
+			endDate="no ending time"
+		fi	
+                printf "from ${startDate} to ${endDate}. \n"
+                printf "Most likely result of improper merging. \nDifferences between previous epoch and extra epoch:\n"        
+                # time to see why it didn't merge 
+                epochDiffName="epochDiffs_${filename}.txt"
+                rm -rf "${epochDiffName}"
+                diff $beforeFilename $afterFilename>>"${epochDiffName}"
+                # replace arrows with a descriptor
+		
+		for issue in "${!codes[@]}"
+		do
+			results=($(grep ${codes[$issue]} ${epochDiffName}))
+			if [[ -n  ${results} ]]
+			then
+				echo -e "\t*There are epoch differences due to ${issue}s: ${codes[$issue]}" 
+			fi
+		done       
+
+	        sed -i 's/</Previous Epoch:/g' "${epochDiffName}"
+                sed -i 's/>/Extra Epoch:   /g' "${epochDiffName}"
+                sed -i 's/---/vs./g' "${epochDiffName}"
+                sed -i '/[0-9]c[0-9]/G' "${epochDiffName}"
+                sed -i '/[0-9]c[0-9]/d' "${epochDiffName}"
+                cat "${epochDiffName}"
+		printf "\n"
+
+                # clean-up a little
+	#	rm -rf "${epochDiffName}"
+         #       rm -rf "${beforeFilename}" "${afterFilename}"
+        fi
+	
+	# Identify inconsistent dates
+
+	# get the dates in the file	
+	inconsistentDate=($(grep "date" $file))
+	dateVerified=0
+	# check that extracted dates have both < & >
+	if [[ ${inconsistentDate[@]} == *"<"* ]] && [[ ${inconsistentDate[@]} == *">"* ]]
+	then
+		dateVerified=$trueSub
+	fi
+	# if there's a < & >, then can say date is inconsistent
+	if [ $dateVerified -eq $trueSub ]
+	then
+		# printf not printing out entire date returned by getSISDate
+		echo -e "\nInconsistent Date found in $filename"
+		# extract
+		# get first date 
+		sisDate=($(echo ${inconsistentDate[@]} | cut -d '>' -f 1 | cut -d '<' -f 2 | cut -d ':' -f 2))
+		# get second date 
+		dcDate=($(echo ${inconsistentDate[@]} | cut -d '>' -f 2 | cut -d '<' -f 1 | cut -d ':' -f 2))
+		# just print first instance, not dealing with multiple cases of inconsistent dates
+		echo -e "\n\tSIS Date: ${sisDate[@]} vs. LOCAL Date: ${dcDate[@]}\n" 
+	fi
+
+	# Identify inconsistent poles; pole values are compared to make determination
+
+	# grab poles from file
+	inconsistentPoles=($(grep ${codes["pole"]} $file))
+	polesVerified=0
+#	polesVerified=($(checkArrowDiff ${inconsistentPoles[*]}))
+	if [[ ${inconsistentPoles[@]} == *"<"* ]] && [[ ${inconsistentPoles[@]} == *">"* ]]
+        then
+                polesVerified=$trueSub
+        fi
+	if [ $polesVerified -eq $trueSub ]
+	then
+		# get the line number from grep and get date range
+                poleLineNum=($(grep -Fn ${codes["pole"]} $file | cut -d ':' -f 1))
+                dateRange=($(getSISDate "${file}" "${originalSISFile}" "${poleLineNum}"))
+
+		# separate entries pointing < way and > way for comparison
+	        rightPole=($(echo ${inconsistentPoles[@]} | cut -d '>' -f 1))
+		rightPole=($(echo ${rightPole[@]} | sed 's/<//g'))
+		leftPole=($(echo ${inconsistentPoles[@]} | cut -d '>' -f 2-10))
+		leftPole=($(echo ${leftPole[@]} | sed 's/>//g'))
+	
+		for pole in "${!rightPole[@]}"
+		do 
+			sisPoles=($(echo ${rightPole[$pole]} | cut -d '>' -f 1 | cut -d '<' -f 2))
+			dcPoles=($(echo ${leftPole[$pole]} | cut -d '>' -f 2 | cut -d '<' -f 1))
+		# compare the poles one by one
+			for i in "${!sisPoles[@]}"
+			do
+   				if [ ${sisPoles[$i]} != ${dcPoles[$i]} ]
+				then
+					verdict=($(findInRange "${sisPoles[$i]}" "${dcPoles[$i]}" "${percent}"))
+					if [ $verdict -eq $trueSub ]
+					then
+						echo -e "\nInconsistent Poles found in $filename from ${dateRange[@]}"
+						echo -e "\n\tSIS Poles: ${sisPoles[$i]}"
+ 						echo -e "\n\tLocal Poles: ${dcPoles[$i]}\n"
+					fi
+				fi		
+			done
+		done
+	fi
+
+	# Identify inconsistent zeros in same manner as poles
+
+	# zeroes treated separately from poles; some equipment have poles but no zeroes
+	# such that bundling them together is slightly less helpful
+	inconsistentZeros=($(grep ${codes["zero"]} $file))
+	zerosVerified=0
+ 	if [[ ${inconsistentZeros[@]} == *"<"* ]] && [[ ${inconsistentZeros[@]} == *">"* ]]
+        then
+                zerosVerified=$trueSub
+        fi
+	if [ $zerosVerified -eq $trueSub ]
+	then
+ 		# get the line number from grep and get date range
+                zeroLineNum=($(grep -Fn ${codes["zero"]} $file | cut -d ':' -f 1))
+
+                dateRange=($(getSISDate "${file}" "${originalSISFile}" "${zeroLineNum}"))
+
+		rightZero=($(echo ${inconsistentZeros[@]} | cut -d '>' -f 1))
+                rightZero=($(echo ${rightZero[@]} | sed 's/<//g'))
+                leftZero=($(echo ${inconsistentZeros[@]} | cut -d '>' -f 2-10))
+                leftZero=($(echo ${leftZero[@]} | sed 's/>//g'))
+                for zero in "${!rightZero[@]}"
+                do
+                        sisZeros=($(echo ${rightZero[$zero]} | cut -d '>' -f 1 | cut -d '<' -f 2))
+                        dcZeros=($(echo ${leftZero[$zero]} | cut -d '>' -f 2 | cut -d '<' -f 1))
+                        for i in "${!sisZeros[@]}"
+                        do
+                                if [ ${sisZeros[$i]} != ${dcZeros[$i]} ]
+                                then
+                                        verdict=($(findInRange "${sisZeros[$i]}" "${dcZeros[$i]}" "$percent"))
+                                        if [ $verdict -eq $trueSub ]
+                                        then
+                                                echo -e "\nInconsistent Zeros found in $filename from ${dateRange[@]}"
+                                                echo -e "\n\tSIS Zeros: ${sisZeros[$i]}"
+                                                echo -e "\n\tLocal Zeros: ${dcZeros[$i]}\n"
+                                        fi
+                                fi
+                        done
+                done
+	fi
+
+	# Identify inconsistent sensitivities
+
+	inconsistentSensitivity=($(grep -n "sensitivity" $file | grep -v "frequency of"))
+	sensitivityVerified=0
+	# check that the sensitivity is off in both files
+	if [[ ${inconsistentSensitivity[@]} == *"<"* ]] && [[ ${inconsistentSensitivity[@]} == *">"* ]]
+        then
+                sensitivityVerified=$trueSub
+        fi
+	if [ $sensitivityVerified -eq $trueSub ]
+	then
+		sisSensitivity=($(echo ${inconsistentSensitivity[@]} | cut -d '>' -f 1 | cut -d '<' -f 2 | cut -d ':' -f 2))
+		sensitivityLineNum=($(echo ${inconsistentSensitivity[@]} | cut -d ':' -f 1))
+		dateRange=($(getSISDate "${file}" "${originalSISFile}" "${sensitivityLineNum}"))
+		dcSensitivity=($(echo ${inconsistentSensitivity[@]} | cut -d '>' -f 2 | cut -d '<' -f 1 | cut -d ':' -f 2))
+		verdict=($(findInRange "$sisSensitivity" "$dcSensitivity" "$percent"))
+		if [ $verdict -eq $trueSub ]
+                then
+                        echo -e "\nInconsistent Sensitivity found in $filename from ${dateRange[@]}"
+                        echo -e "\n\tSIS Sensitivity: ${sisSensitivity} vs. LOCAL Sensitivity: $dcSensitivity\n"    
+                fi
+	fi
+	
+	# Identify inconsistent gains; same process as sensitivity
+	inconsistentGain=($(grep -n "gain" $file | grep -v "frequency of"))
+        gainVerified=0
+        if [[ ${inconsistentGain[@]} == *"<"* ]] && [[ ${inconsistentGain[@]} == *">"* ]]
+        then
+                gainVerified=$trueSub
+        fi
+
+        if [ $gainVerified -eq $trueSub ]
+        then
+                sisGain=($(echo ${inconsistentGain[@]} | cut -d '>' -f 1 | cut -d '<' -f 2 | cut -d ':' -f 2))
+                gainLineNum=($(echo ${inconsistentGain[@]} | cut -d ':' -f 1))
+                dateRange=($(getSISDate "${file}" "${originalSISFile}" "${gainLineNum}"))
+                dcGain=($(echo ${inconsistentGain[@]} | cut -d '>' -f 2 | cut -d '<' -f 1 | cut -d ':' -f 2))
+                verdict=($(findInRange "$sisGain" "$dcGain" $percent))
+                if [ $verdict -eq $trueSub ]
+                then
+                        echo -e "\nInconsistent Gain found in $filename from ${dateRange[@]}"
+                        echo -e "\n\tSIS Gain: ${sisGain} vs. LOCAL Gain: $dcGain\n"
+                fi
+        fi	
+
+	# Check for inconsistent polynomials
+
+	inconsistentPolynomial=($(grep ${codes["polynomial"]} $file))
+	polynomialVerified=0
+	if [[ ${inconsistentPolynomial[@]} == *"<"* ]] && [[ ${inconsistentPolynomial[@]} == *">"* ]]
+        then
+                polynomialVerified=$trueSub
+        fi
+	if [ $polynomialVerified -eq $trueSub ]
+	then
+		# get the line number from grep and get date range; 
+		polyLineNum=($(grep -Fn ${codes["polynomial"]} $file))
+		polyLineNum=($(echo $polyLineNum | cut -d ':' -f 1))
+		dateRange=($(getSISDate "${file}" "${originalSISFile}" "${polyLineNum}"))
+		rightPoly=($(echo ${inconsistentPolynomial[@]} | cut -d '>' -f 1))
+		rightPoly=($(echo ${rightPoly[@]} | sed 's/<//g'))
+		leftPoly=($(echo ${inconsistentPolynomial[@]} | cut -d '>' -f 2-10))
+		leftPoly=($(echo ${leftPoly[@]} | sed 's/>//g'))
+		for polynomial in "${!rightPoly[@]}"
+		do 
+			sisPoly=($(echo ${rightPoly[$polynomial]} | cut -d '>' -f 1 | cut -d '<' -f 2))
+			dcPoly=($(echo ${leftPoly[$polynomial]} | cut -d '>' -f 2 | cut -d '<' -f 1))	
+			for i in "${!sisPoly[@]}"
+			do
+   				if [ ${sisPoly[$i]} != ${dcPoly[$i]} ]
+				then
+					verdict=($(findInRange "${sisPoly[$i]}" "${dcPoly[$i]}" "${percent}"))
+					if [ $verdict -eq $trueSub ]
+					then
+						echo -e "\nInconsistent Polynomials found in $filename from ${dateRange[@]}"
+						echo -e "\n\tSIS Polynomial: ${sisPoly[$i]} vs. LOCAL Polynomial: ${dcPoly[$i]}\n"
+					fi
+				fi		
+			done
+		done
+	fi
+
+	# Check for inconsistent units
+
+	inconsistentUnits=($(grep "units lookup:" $file))
+	unitsVerified=0
+	if [[ ${inconsistentUnits[@]} == *"<"* ]] && [[ ${inconsistentUnits[@]} == *">"* ]]
+        then
+                unitsVerified=$trueSub
+        fi
+	if [ $unitsVerified -eq $trueSub ]
+        then
+		# get the line number from grep and get date range; grep is redundant but number before : is a pain
+                unitLineNum=($(grep -Fn "units lookup:" $file))
+                unitLineNum=($(echo $unitLineNum | cut -d ':' -f 1))
+		dateRange=($(getSISDate "${file}" "${originalSISFile}" "${unitLineNum}"))
+
+		# get the units for printing
+		sisUnits=($(echo ${inconsistentUnits[@]} | cut -d '>' -f 1 | cut -d '<' -f 2))
+		dcUnits=($(echo ${inconsistentUnits[@]} | cut -d '>' -f 2 | cut -d '<' -f 1))
+
+		echo -e "\nInconsistent Units found in $filename from ${dateRange[@]}"
+	        echo -e "\n\tSIS Units: ${sisUnits[@]}"
+		echo -e "\n\tLOCAL Units: ${dcUnits[@]}\n"
+        fi
+done
+printf "\n"

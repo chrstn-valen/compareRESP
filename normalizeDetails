@@ -1,0 +1,88 @@
+#!/bin/bash
+
+FOLDER_1="$1"
+FOLDER_2="$2"
+
+folders=( ${FOLDER_1} ${FOLDER_2} )
+# Goal is to make files have more in common while not editing out the important things
+# will not catch everything and dictionary (line 24) will require fine tuning 
+
+if [ "$#" -ne 2 ]
+then
+	echo "Error: Wrong number of arguments."
+	echo "Syntax: normalizeDetails LOCAL_FOLDER SIS_FOLDER"
+	exit 1
+fi
+
+declare -A dictionary
+# Add a problem variable and what it needs to be to prevent unwanted identifications of inconsistencies
+# first value will be swapped with second value; for example, URAD is replaced with MICRORADIANS
+# file will be made entirely lowercase so anything here should also be lowercase 
+# sed returns an error if I try to change these to lowercase in the for loop
+# \ should be placed before any slashes; SIS treated as ground truth for most
+# parenthesis should be left out; .* is any number of characters between 
+dictionary=( ["microradians"]="urad"
+	     ["v.*-.*volts.*"]="v - voltage in volts" 
+	     [" per second per second"]=" per second squared"
+             ["- ecified"]="specified"
+	     ["none.specified"]="none specified"
+	     ["none.*specified"]="null"
+	     ["-.*degree.*celsius.*"]="- temperature in degree celsius"
+             ["a.*-.*ampere.*"]="a - electric current in amperes"
+	     ["%.*-.*percentage.*"]="% - percent in percentage"	
+	     ["m\/s.*-.*null"]="m\/s - velocity in meters per second"	
+	     [" s.*-.*null"]=" s - time in seconds"
+	     ["p.*-.*null"]="% - percent in percentage" 
+	     ["-.*degree.*centigrade.*"]="- temperature in degree celsius"
+	     ["w\/m2"]="w\/m\*\*2"
+	     ["watt.*square.*meter.*"]="electric power density in watts per meter squared"
+	     ["pa.*-.*null"]="pa - pressure in pascals"
+	     ["cubic meter\/cubic meter.*"]="volumetric strain"
+	     ["- volumetric strain.*"]="- volumetric strain in volumetric strain" 
+	     ["m\/s\*\*2.*-.*null"]="m\/s\*\*2 - acceleration in meters per second squared"
+	     ["m\/s.*-.*null.*"]="m\/s - velocity in meters per second"
+	     ["m\/s.*-.*time in seconds"]="m\/s - velocity in meters per second" 
+	     [" count.*"]=" counts - digital count in digital counts"
+	)
+
+echo "Normalizing units according to dictionary in normalizeDetails"
+echo "Removing comments and FIR filter coefficients"
+
+for folder in ${folders[@]}
+do
+	files=$(find ${folder} -maxdepth 1 -not -type d ! -name '*.dataless' ! -name '*.txt')
+	for file in $files
+	do
+		# make everything lowercase because a lot of these inconsistencies are just different cases	
+		sed -i 's/\(.*\)/\L\1/' $file
+		# Some changes require special attention; If you would like something to stay, comment it out with a #
+		# Our DC files don't have .0000 and SIS's do; stay on the safe side and sed everything just in case
+		sed -i "/date/ s/.0000//g" $file
+		# take out comments
+		sed -i "/^[ \t]*#/d" $file
+		# take out the fir filter coefficients; B041F0* is used for NCEDC files; B061f0* is SIS 
+		sed -i '/b041f0/d' $file
+		sed -i '/b061f0/d' $file
+		# Far left can differ for units, but shouldn't be relevant
+		#sed -i "s/.*response in units lookup/response in units lookup/g" $file	
+		#sed -i "s/.*response out units lookup/response out units lookup/g" $file
+		 # Take out file transfer type for consistency
+	        sed -i 's/ \[digital (z\-transform)\]//g' $file
+		# remove any blank space at the end of lines for consistency
+		sed -i "s/[[:blank:]]*$//g" $file
+		# remove blank spaces before line
+		sed -i "s/^[[:blank:]]//g" $file
+		# take out all parenthesis
+		sed -i 's/[()]//g' $file
+		# counts as a unit are an annoying case; modifying
+ 		sed -i '/in units/ s/.*counts.*/in units: counts/g' $file 
+		sed -i '/out units/ s/.*counts.*/out units: counts/g' $file
+
+		# make all of the changes in dictionary
+        	for change in "${!dictionary[@]}"
+        	do
+			sed -i "s/${change}/${dictionary[$change]}/g" $file
+		done
+	done
+done
+
