@@ -1,7 +1,6 @@
 compareRESP: BASH scripts that compare RESP files and finds relevant differences between the two in a summary. 
 Created with the differences between NCEDC and SIS RESP files in mind. 
 Last updated 12/27/2023. 
-Feel free to send questions/suggestions to Christina(she/her) at christina.valen@berkeley.edu.
 
 Usage: compareRESP -n network_code -s station -l location_of_Non-SIS_RESP_Files 
 -t test_or_production -f preview_or_publication -p percent_ for_range
